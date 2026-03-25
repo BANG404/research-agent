@@ -12,3 +12,6 @@ dist/
 .langgraph_api/
 
 docs/
+
+milvus.db
+milvus_*.db

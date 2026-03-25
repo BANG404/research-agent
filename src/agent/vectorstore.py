@@ -23,6 +23,37 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 # ---------------------------------------------------------------------------
 
 MILVUS_URI = os.getenv("APP_MILVUS_URI", "./milvus.db")
+
+
+# ---------------------------------------------------------------------------
+# Milvus Lite TCP bootstrap (UDS is unreliable on some Linux/WSL2 environments)
+# ---------------------------------------------------------------------------
+
+_milvus_lite_server = None  # keep reference so process stays alive
+
+
+def _resolve_milvus_uri(uri: str) -> str:
+    """If *uri* is a local .db file, start milvus-lite on TCP and return an
+    http://localhost:PORT URI.  Otherwise return *uri* unchanged."""
+    global _milvus_lite_server
+    if uri.startswith("http://") or uri.startswith("https://"):
+        return uri
+    # Local file path → start milvus-lite with TCP
+    import pathlib
+    from milvus_lite.server import Server
+
+    port = int(os.getenv("APP_MILVUS_LITE_PORT", "19530"))
+    tcp_addr = f"localhost:{port}"
+    db_path = str(pathlib.Path(uri).absolute())
+    if _milvus_lite_server is None:
+        import time
+
+        s = Server(db_path, address=tcp_addr)
+        if not s.init() or not s.start():
+            raise RuntimeError(f"Failed to start milvus-lite for {db_path}")
+        time.sleep(2)  # wait for gRPC server to be ready
+        _milvus_lite_server = s
+    return f"http://{tcp_addr}"
 COLLECTION_NAME = os.getenv("APP_MILVUS_COLLECTION", "aapl_10k")
 
 EMBEDDING_API_KEY = os.getenv("EMBEDDING_OPENAI_API_KEY", "")
@@ -50,6 +81,8 @@ def get_embeddings() -> OpenAIEmbeddings:
         model=EMBEDDING_MODEL,
         api_key=EMBEDDING_API_KEY,  # type: ignore[arg-type]
         base_url=EMBEDDING_BASE_URL,
+        check_embedding_ctx_length=False,  # send plain text, not tiktoken IDs
+        chunk_size=16,  # API limit: max 20 texts per request
     )
 
 
@@ -65,13 +98,39 @@ def get_vectorstore(collection_name: str = COLLECTION_NAME) -> Milvus:
     Metadata fields (symbol, fiscal_year, section_title, etc.) are stored via
     dynamic fields and can be used in Milvus filter expressions.
     """
-    return Milvus(
+    uri = _resolve_milvus_uri(MILVUS_URI)
+    vs = Milvus(
         embedding_function=get_embeddings(),
-        connection_args={"uri": MILVUS_URI},
+        connection_args={"uri": uri},
         collection_name=collection_name,
         auto_id=True,
         enable_dynamic_field=True,
     )
+    return vs
+
+
+def build_expr(filters: dict) -> str | None:
+    """Convert a metadata filter dict to a Milvus filter expression."""
+    if not filters:
+        return None
+    parts = []
+    for key, value in filters.items():
+        if isinstance(value, str):
+            parts.append(f'{key} == "{value}"')
+        else:
+            parts.append(f"{key} == {value}")
+    return " && ".join(parts)
+
+
+def search(query: str, metadata_filters: dict | None = None, k: int = 10) -> list[Document]:
+    """Similarity search with optional metadata filtering."""
+    vs = get_vectorstore()
+    kwargs: dict = {"k": k}
+    if metadata_filters:
+        expr = build_expr(metadata_filters)
+        if expr:
+            kwargs["expr"] = expr
+    return vs.similarity_search(query, **kwargs)
 
 
 def split_and_add(docs: list[Document], collection_name: str = COLLECTION_NAME) -> int:
