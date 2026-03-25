@@ -73,7 +73,7 @@ def retrieve(
                           distinct sub-questions; a simple question needs just one.
         keyword_groups:   2-4 search queries, each a list of ~3 synonyms/variants targeting
                           one theme. Groups run in parallel; results are merged and deduplicated.
-        metadata_filters: Optional metadata filters, e.g. {"year": 2026}.
+        metadata_filters: Optional metadata filters, e.g. {"fiscal_year": 2024, "symbol": "AAPL"}.
         top_k:            Chunks returned per perspective after reranking (default 5).
 
     Returns:
@@ -140,6 +140,11 @@ Always call the `retrieve` tool before answering any factual question.
 **keyword_groups** — what to fetch (breadth)
   Decompose the question into 2-4 distinct themes. Each group is ~3 synonyms or
   variants of one theme; all groups run in parallel and results are deduplicated.
+
+**metadata_filters** — narrow the search scope (optional)
+  Pass only when the question explicitly targets a specific year or company.
+  Available fields: fiscal_year (int), symbol (str), form_type (str), section_id (int).
+  Example: {{"fiscal_year": 2024, "symbol": "AAPL"}}
 
 **perspectives** — how to rank (depth)
   1-3 focused analytical angles. Use 1 for a simple question, up to 3 only when the

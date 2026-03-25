@@ -17,7 +17,6 @@ import httpx
 from langchain_core.documents import Document
 from langchain_milvus import BM25BuiltInFunction, Milvus
 from langchain_openai import OpenAIEmbeddings
-from pymilvus import RRFRanker
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ---------------------------------------------------------------------------
@@ -122,11 +121,32 @@ _vs_cache: dict[str, Milvus] = {}
 _vs_lock = threading.Lock()
 
 
+def _make_vectorstore(collection_name: str, uri: str) -> Milvus:
+    """Instantiate a Milvus vector store.
+
+    When APP_MILVUS_URI points to a full Milvus server, both vector_field and
+    builtin_function are always passed so langchain_milvus can handle hybrid
+    search (dense + BM25) on both create and connect paths.
+    """
+    kwargs: dict = {}
+    if _USE_BM25:
+        kwargs["vector_field"] = ["vector", "sparse"]
+        kwargs["builtin_function"] = BM25BuiltInFunction(
+            analyzer_params={"type": "english"},
+        )
+    return Milvus(
+        embedding_function=get_embeddings(),
+        connection_args={"uri": uri},
+        collection_name=collection_name,
+        auto_id=True,
+        enable_dynamic_field=True,
+        **kwargs,
+    )
+
+
 def get_vectorstore(collection_name: str = COLLECTION_NAME) -> Milvus:
     """Return a Milvus vector store connected to the configured backend.
 
-    The collection is created automatically on first use.
-    Uses hybrid search: dense embeddings (Qwen3-Embedding-8B) + BM25 sparse vectors.
     Metadata fields (symbol, fiscal_year, section_title, etc.) are stored via
     dynamic fields and can be used in Milvus filter expressions.
     """
@@ -136,20 +156,7 @@ def get_vectorstore(collection_name: str = COLLECTION_NAME) -> Milvus:
         if collection_name in _vs_cache:  # re-check after acquiring lock
             return _vs_cache[collection_name]
         uri = _resolve_milvus_uri(MILVUS_URI)
-        kwargs: dict = {}
-        if _USE_BM25:
-            kwargs["vector_field"] = ["vector", "sparse"]
-            kwargs["builtin_function"] = BM25BuiltInFunction(
-                analyzer_params={"type": "english"},
-            )
-        vs = Milvus(
-            embedding_function=get_embeddings(),
-            connection_args={"uri": uri},
-            collection_name=collection_name,
-            auto_id=True,
-            enable_dynamic_field=True,
-            **kwargs,
-        )
+        vs = _make_vectorstore(collection_name, uri)
         _vs_cache[collection_name] = vs
         return vs
 
@@ -168,10 +175,13 @@ def build_expr(filters: dict) -> str | None:
 
 
 def search(query: str, metadata_filters: dict | None = None, k: int = 10) -> list[Document]:
-    """Hybrid search (dense + BM25) with optional metadata filtering."""
+    """Hybrid search (dense + BM25) with optional metadata filtering.
+
+    When APP_MILVUS_URI points to a full Milvus server, the collection is created
+    with a BM25 sparse field and langchain_milvus automatically uses RRF hybrid
+    ranking — no explicit ranker kwarg needed.
+    """
     kwargs: dict = {"k": k}
-    if _USE_BM25:
-        kwargs["reranker"] = RRFRanker()
     if metadata_filters:
         expr = build_expr(metadata_filters)
         if expr:
@@ -190,10 +200,18 @@ def search(query: str, metadata_filters: dict | None = None, k: int = 10) -> lis
 def split_and_add(docs: list[Document], collection_name: str = COLLECTION_NAME) -> int:
     """Chunk documents with RecursiveCharacterTextSplitter then upsert into Milvus.
 
+    Uses builtin_function=BM25BuiltInFunction so the sparse field is created on
+    first insert; subsequent calls reuse the same Milvus instance.
     Returns the number of chunks inserted.
     """
     chunks = [c for c in _splitter.split_documents(docs) if len(c.page_content.strip()) >= 100]
-    vs = get_vectorstore(collection_name)
+    # Use the write-path vectorstore (with BM25 builtin_function for collection creation)
+    with _vs_lock:
+        write_key = f"__write__{collection_name}"
+        if write_key not in _vs_cache:
+            uri = _resolve_milvus_uri(MILVUS_URI)
+            _vs_cache[write_key] = _make_vectorstore(collection_name, uri)
+        vs = _vs_cache[write_key]
     ids = vs.add_documents(chunks)
     return len(ids)
 
