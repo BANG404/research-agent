@@ -1,0 +1,1 @@
+"""FastAPI upload service package."""
