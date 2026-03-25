@@ -121,6 +121,23 @@ _vs_cache: dict[str, Milvus] = {}
 _vs_lock = threading.Lock()
 
 
+def _patch_pymilvus_connections():
+    import pymilvus
+    from pymilvus.orm.connections import connections as _orm_connections
+
+    original_init = pymilvus.MilvusClient.__init__
+
+    def patched_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        if hasattr(self, "_using") and hasattr(self, "_handler"):
+            if self._using not in _orm_connections._alias_handlers:
+                _orm_connections._alias_handlers[self._using] = self._handler
+
+    pymilvus.MilvusClient.__init__ = patched_init
+
+
+_patch_pymilvus_connections()
+
 def _make_vectorstore(collection_name: str, uri: str) -> Milvus:
     """Instantiate a Milvus vector store.
 
