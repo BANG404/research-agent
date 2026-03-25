@@ -34,7 +34,7 @@ def json_to_documents(path: Path) -> list[Document]:
 
     return [
         Document(
-            page_content=row["section_text"],
+            page_content=f"[{row['section_title']}]\n\n{row['section_text']}",
             metadata={
                 "symbol": row["symbol"],
                 "fiscal_year": int(row["file_fiscal_year"]),

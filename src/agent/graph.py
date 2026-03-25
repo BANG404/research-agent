@@ -61,7 +61,7 @@ def retrieve(
     question: str,
     perspectives: list[str],
     keyword_groups: list[list[str]],
-    metadata_filters: Annotated[dict | None, BeforeValidator(lambda v: None if (not isinstance(v, str) or v.strip().lower() in ("none", "null", "")) else json.loads(v) if v.strip().startswith("{") else None)] = None,
+    metadata_filters: Annotated[dict | None, BeforeValidator(lambda v: v if isinstance(v, dict) else None if (not isinstance(v, str) or v.strip().lower() in ("none", "null", "")) else json.loads(v) if v.strip().startswith("{") else None)] = None,
     top_k: int = 5,
 ) -> str:
     """Search the knowledge base for chunks most relevant to the question.
@@ -108,7 +108,7 @@ def retrieve(
     def _fmt_doc(i: int, doc: Document) -> str:
         meta = doc.metadata
         tags = " | ".join(
-            str(v) for k, v in meta.items() if v and k not in ("id", "pk")
+            str(v) for k, v in meta.items() if v and k not in ("id", "pk", "section_title")
         )
         header = f"  [{i}] {tags}" if tags else f"  [{i}]"
         return f"{header}\n  {doc.page_content[:2000]}"

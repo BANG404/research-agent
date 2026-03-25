@@ -15,3 +15,4 @@ docs/
 
 milvus.db
 milvus_*.db
+.milvus.db.lock

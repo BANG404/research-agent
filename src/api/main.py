@@ -62,7 +62,7 @@ def _parse_10k_json(content: bytes) -> list[Document]:
             continue
         docs.append(
             Document(
-                page_content=text,
+                page_content=f"[{row.get('section_title', '')}]\n\n{text}" if row.get("section_title") else text,
                 metadata={
                     "symbol": str(row.get("symbol", "")),
                     "fiscal_year": int(row.get("file_fiscal_year", 0)),
