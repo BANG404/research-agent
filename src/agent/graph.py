@@ -1,4 +1,4 @@
-"""LangGraph 1.0 research agent with Milvus retrieval.
+"""LangGraph 1.0 general-purpose research agent with Milvus retrieval.
 
 Pipeline:
   1. Retrieve  – per keyword-group hybrid search + metadata filter (parallel).
@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from typing import Annotated, Any
 
 from pydantic import BeforeValidator
@@ -63,19 +64,20 @@ def retrieve(
     metadata_filters: Annotated[dict | None, BeforeValidator(lambda v: None if (not isinstance(v, str) or v.strip().lower() in ("none", "null", "")) else json.loads(v) if v.strip().startswith("{") else None)] = None,
     top_k: int = 5,
 ) -> str:
-    """Search the AAPL 10-K knowledge base for sections relevant to the question.
+    """Search the knowledge base for chunks most relevant to the question.
 
     Args:
-        question:         The original user question.
-        perspectives:     List of retrieval angles used for reranking (e.g. ["revenue trend",
-                          "risk factors"]). Each perspective produces its own ranked result set.
-        keyword_groups:   List of keyword groups; each group is searched independently.
-                          Example: [["revenue", "sales"], ["operating expenses", "cost"]].
-        metadata_filters: Optional metadata field filters, e.g. {"fiscal_year": 2024}.
-        top_k:            Number of chunks per perspective after reranking (default 5).
+        question:         The verbatim user question.
+        perspectives:     1-3 reranking angles — each re-ranks the full candidate pool
+                          independently. Use more angles only when the question has clearly
+                          distinct sub-questions; a simple question needs just one.
+        keyword_groups:   2-4 search queries, each a list of ~3 synonyms/variants targeting
+                          one theme. Groups run in parallel; results are merged and deduplicated.
+        metadata_filters: Optional metadata filters, e.g. {"year": 2026}.
+        top_k:            Chunks returned per perspective after reranking (default 5).
 
     Returns:
-        Formatted string with one result section per perspective.
+        Markdown string with one titled section per perspective.
     """
     from agent.vectorstore import rerank, search
 
@@ -104,12 +106,12 @@ def retrieve(
 
     # Step 3 — rerank per perspective and collect results
     def _fmt_doc(i: int, doc: Document) -> str:
-        return (
-            f"  [{i}] {doc.metadata.get('section_title', 'N/A')} | "
-            f"{doc.metadata.get('symbol', 'N/A')} | "
-            f"FY{doc.metadata.get('fiscal_year', 'N/A')}\n"
-            f"  {doc.page_content[:2000]}"
+        meta = doc.metadata
+        tags = " | ".join(
+            str(v) for k, v in meta.items() if v and k not in ("id", "pk")
         )
+        header = f"  [{i}] {tags}" if tags else f"  [{i}]"
+        return f"{header}\n  {doc.page_content[:2000]}"
 
     sections: list[str] = []
     for perspective in perspectives:
@@ -125,20 +127,53 @@ def retrieve(
 # LangChain agent (langchain.agents.create_agent — LangChain 1.0 LTS)
 # ---------------------------------------------------------------------------
 
+def _system_prompt() -> str:
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return f"""\
+Current date and time: {now}
+
+You are a general-purpose research assistant backed by a private knowledge base.
+Always call the `retrieve` tool before answering any factual question.
+
+## How to build `retrieve` arguments
+
+**keyword_groups** — what to fetch (breadth)
+  Decompose the question into 2-4 distinct themes. Each group is ~3 synonyms or
+  variants of one theme; all groups run in parallel and results are deduplicated.
+
+**perspectives** — how to rank (depth)
+  1-3 focused analytical angles. Use 1 for a simple question, up to 3 only when the
+  question has clearly distinct sub-questions. Each angle independently re-ranks the
+  full candidate pool.
+
+### Example
+Question: "How does Ubuntu compare to Windows today? Is switching feasible?"
+
+keyword_groups:
+  [
+    ["Ubuntu market share 2026", "desktop Linux market share", "Linux usage statistics"],
+    ["Windows market share 2026", "Windows desktop usage", "Windows vs Linux adoption"],
+    ["Ubuntu developer usage", "Linux developer survey 2026", "developer OS preference"],
+    ["switch Windows to Ubuntu", "migrate to Linux pros cons", "Ubuntu migration guide developers"],
+  ]
+
+perspectives:
+  [
+    "Ubuntu vs Windows market share and usage trends 2026",
+    "migration feasibility from Windows to Ubuntu for developers",
+  ]
+
+## After retrieval
+- Synthesise across all perspective sections; do not just repeat them.
+- Cite the source metadata shown in each chunk header.
+- If the knowledge base has no relevant content, say so and answer from general
+  knowledge, noting the limitation.
+- Be concise and accurate.
+"""
+
+
 graph = create_agent(
     model=_llm,
     tools=[retrieve],
-    system_prompt=(
-        "You are a financial research assistant specialising in Apple Inc. SEC filings. "
-        "Always call the retrieve tool before answering factual questions about Apple's "
-        "business, financials, risks, or strategy. "
-        "When calling retrieve, you must supply:\n"
-        "  • perspectives – 2-4 distinct angles from which to evaluate the results "
-        "(e.g. 'revenue growth', 'risk factors', 'segment breakdown').\n"
-        "  • keyword_groups – 2-4 groups of keywords, each group targeting a different "
-        "aspect of the question (e.g. [['revenue', 'net sales'], ['operating income']]).\n"
-        "  • metadata_filters – set {'fiscal_year': YYYY} when a specific year is mentioned.\n"
-        "Cite the section title and fiscal year from the retrieved context. "
-        "Be concise and accurate."
-    ),
+    system_prompt=_system_prompt(),
 )
