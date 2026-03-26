@@ -1,0 +1,3 @@
+[submodule "src/agent-chat-ui"]
+	path = src/agent-chat-ui
+	url = https://github.com/BANG404/agent-chat-ui
